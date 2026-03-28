@@ -1,0 +1,334 @@
+name: Build Kernel | OnePlus 13 (dodge / sm8750)
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: 'Device region'
+        required: true
+        default: 'china'
+        type: choice
+        options:
+          - china
+          - global
+      ksu_variant:
+        description: 'KernelSU variant'
+        required: true
+        default: 'SukiSU'
+        type: choice
+        options: [SukiSU, ReSukiSU, KernelSU, KernelSU-Next, WildKSU]
+      susfs_branch:
+        description: 'SuSFS branch or commit (leave empty for auto: gki-android15-6.6)'
+        required: false
+        default: ''
+        type: string
+      optimize_level:
+        description: 'Compiler optimization level'
+        required: true
+        default: 'O2'
+        type: choice
+        options: [O2, O3]
+      localversion:
+        description: 'Version suffix'
+        required: true
+        default: '-palaziks'
+        type: string
+      make_release:
+        description: 'Create GitHub Release?'
+        required: true
+        type: boolean
+        default: false
+      clean_build:
+        description: 'Clean build (no ccache)'
+        type: boolean
+        default: false
+      swap_size:
+        description: 'Swap size in GB'
+        required: true
+        default: '16'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # ── Device constants ────────────────────────────────────────────────
+      DEVICE_CODENAME: dodge
+      SOC: sun
+      ANDROID_VERSION: android15
+      KERNEL_VERSION: "6.6"
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # ── Swap ────────────────────────────────────────────────────────────
+      - name: Dynamic Memory Allocation (Swap)
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: ${{ inputs.swap_size || '16' }}
+
+      # ── Dependencies ────────────────────────────────────────────────────
+      - name: Install Dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git curl ca-certificates build-essential flex bison \
+            libelf-dev libssl-dev libncurses-dev zlib1g-dev liblz4-tool \
+            libxml2-utils rsync unzip dwarves file python3 ccache jq bc \
+            dos2unix kmod libdw-dev elfutils repo
+          sudo apt-get clean
+
+      # ── ccache ──────────────────────────────────────────────────────────
+      - name: Configure ccache
+        if: ${{ inputs.clean_build != true }}
+        run: |
+          ccache -o max_size=2.0G
+          ccache -o compression=true
+          ccache -o compression_level=3
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+
+      # ── Resolve manifest ─────────────────────────────────────────────────
+      # China  → oneplus_13.xml   (branch oneplus/sm8750)
+      # Global → oneplus_13_v.xml (branch oneplus/sm8750, OOS15 variant)
+      - name: Resolve Manifest
+        run: |
+          if [ "${{ inputs.region }}" = "global" ]; then
+            echo "MANIFEST_FILE=oneplus_13_v.xml" >> "$GITHUB_ENV"
+            echo "ARTIFACT_SUFFIX=global" >> "$GITHUB_ENV"
+          else
+            echo "MANIFEST_FILE=oneplus_13.xml" >> "$GITHUB_ENV"
+            echo "ARTIFACT_SUFFIX=china" >> "$GITHUB_ENV"
+          fi
+
+      # ── Sync kernel sources via repo ─────────────────────────────────────
+      - name: Sync Kernel Source (repo)
+        run: |
+          mkdir -p kernel_src && cd kernel_src
+          repo init --depth=1 \
+            -u https://github.com/OnePlusOSS/kernel_manifest \
+            -b oneplus/sm8750 \
+            -m "$MANIFEST_FILE"
+          repo sync -c -j$(nproc) --no-tags --no-clone-bundle
+          echo "KERNEL_SRC=$(pwd)" >> "$GITHUB_ENV"
+
+      # ── KernelSU variant ─────────────────────────────────────────────────
+      - name: Integrate KernelSU Variant
+        working-directory: kernel_src/kernel_platform/common
+        run: |
+          set -e
+          VARIANT="${{ inputs.ksu_variant }}"
+          echo "=== Setting up $VARIANT ==="
+
+          case "$VARIANT" in
+            SukiSU)
+              curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
+                | bash -s susfs-main ;;
+            ReSukiSU)
+              curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" \
+                | bash -s main ;;
+            KernelSU)
+              curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
+                | bash -s main ;;
+            KernelSU-Next)
+              curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" \
+                | bash -s next ;;
+            WildKSU)
+              curl -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh" \
+                | bash -s wild ;;
+          esac
+
+          KSU_DIR=$(find . -maxdepth 4 -type d \
+            \( -name "KernelSU" -o -name "KernelSU-Next" -o -name "Wild_KSU" \) \
+            | head -n 1)
+          [ -d "$KSU_DIR/kernel" ] && KSU_DIR="$KSU_DIR/kernel"
+
+          if [ -z "$KSU_DIR" ] || [ ! -d "$KSU_DIR" ]; then
+            echo "ERROR: KSU dir not found!"
+            find . -maxdepth 4 -type d | head -40
+            exit 1
+          fi
+
+          echo "KSU_ABS=$(realpath $KSU_DIR)" >> "$GITHUB_ENV"
+          echo "Found KSU dir: $KSU_DIR"
+
+          ln -sf "$(realpath $KSU_DIR)" drivers/kernelsu
+          grep -q "kernelsu" drivers/Makefile || \
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          grep -q "kernelsu" drivers/Kconfig || \
+            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+      # ── SuSFS ────────────────────────────────────────────────────────────
+      - name: Setup SuSFS
+        working-directory: kernel_src/kernel_platform/common
+        run: |
+          set -e
+          SUSFS_DIR="$(pwd)/../../../../susfs4ksu"
+          SUSFS_BRANCH="${{ inputs.susfs_branch }}"
+          [ -z "$SUSFS_BRANCH" ] && SUSFS_BRANCH="gki-android15-6.6"
+
+          echo "=== Cloning SuSFS branch: $SUSFS_BRANCH ==="
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git \
+            -b "$SUSFS_BRANCH" "$SUSFS_DIR"
+
+          echo "=== Apply SuSFS patch to KernelSU ==="
+          if [ -n "$KSU_ABS" ] && [ -d "$KSU_ABS" ]; then
+            cd "$KSU_ABS"
+            patch -p1 < "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" \
+              && echo "KSU susfs patch OK" || echo "KSU susfs patch skipped"
+            cd - > /dev/null
+          fi
+
+          echo "=== Apply SuSFS patch to kernel tree ==="
+          # Try the 6.6-compatible patch name first, fall back to 5.15
+          SUSFS_KPATCH=$(ls "$SUSFS_DIR/kernel_patches/"/50_add_susfs_in_kernel-*.patch 2>/dev/null | head -n 1)
+          if [ -n "$SUSFS_KPATCH" ]; then
+            patch -p1 < "$SUSFS_KPATCH" \
+              && echo "Kernel susfs patch OK ($SUSFS_KPATCH)" \
+              || echo "Kernel susfs patch had errors (continuing)"
+          else
+            echo "WARNING: No kernel susfs patch found in $SUSFS_DIR/kernel_patches/"
+          fi
+
+          echo "=== Copy SuSFS source files ==="
+          cp -v "$SUSFS_DIR/kernel_patches/fs/susfs.c"               fs/
+          cp -v "$SUSFS_DIR/kernel_patches/include/linux/susfs.h"     include/linux/
+          cp -v "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" include/linux/
+
+          grep -q "susfs.o" fs/Makefile || echo "obj-y += susfs.o" >> fs/Makefile
+          echo "=== SuSFS integrated ==="
+
+      # ── Defconfig flags ──────────────────────────────────────────────────
+      - name: Append Flags to Defconfig
+        working-directory: kernel_src/kernel_platform/common
+        run: |
+          set -e
+          # GKI 6.6 uses gki_defconfig; dodge-specific fragments are overlaid by build script
+          DEFCONFIG=$(find arch/arm64/configs -name "gki_defconfig" | head -n 1)
+          if [ -z "$DEFCONFIG" ]; then
+            DEFCONFIG=$(find arch/arm64/configs -name "*dodge*defconfig" | head -n 1)
+          fi
+          if [ -z "$DEFCONFIG" ] || [ ! -f "$DEFCONFIG" ]; then
+            echo "CRITICAL: defconfig not found!"; ls arch/arm64/configs/; exit 1
+          fi
+          echo "Using defconfig: $DEFCONFIG"
+
+          for FLAG in \
+            "CONFIG_KSU=y" \
+            "CONFIG_KSU_DEBUG=n" \
+            "CONFIG_KSU_SUSFS=y" \
+            "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" \
+            "CONFIG_KSU_SUSFS_SUS_MOUNT=y" \
+            "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" \
+            "CONFIG_KSU_SUSFS_ENABLE_LOG=y" \
+            "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" \
+            "CONFIG_KPM=y" \
+            "CONFIG_KALLSYMS=y" \
+            "CONFIG_KALLSYMS_ALL=y" \
+            "CONFIG_TCP_CONG_BBR=y" \
+            "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" \
+            "CONFIG_NET_SCH_FQ=y" \
+            "CONFIG_IP_SET=y" \
+            "CONFIG_IP_SET_HASH_IP=y" \
+            "CONFIG_IP_SET_HASH_NET=y" \
+            "CONFIG_NETFILTER_XT_SET=y" \
+            "CONFIG_IP6_NF_NAT=y" \
+            "CONFIG_IP6_NF_MASQUERADE=y" \
+            "CONFIG_NETFILTER_XT_TARGET_TTL=y" \
+            "CONFIG_TMPFS_XATTR=y" \
+            "CONFIG_TMPFS_POSIX_ACL=y" \
+            "CONFIG_LTO_CLANG_THIN=y"; do
+            KEY=$(echo "$FLAG" | cut -d= -f1)
+            grep -q "^${KEY}[=\ ]" "$DEFCONFIG" || echo "$FLAG" >> "$DEFCONFIG"
+          done
+          echo "Flags appended."
+
+      # ── Build ────────────────────────────────────────────────────────────
+      - name: Build Kernel
+        working-directory: kernel_src
+        run: |
+          set -e
+          export LOCALVERSION="${{ inputs.localversion || '-palaziks' }}"
+          export OPTIMIZE_FLAGS="-${{ inputs.optimize_level }}"
+
+          # Patch LTO and optimization into the build environment
+          export KCFLAGS="$OPTIMIZE_FLAGS"
+          export KAFLAGS="$OPTIMIZE_FLAGS"
+
+          BUILD_SCRIPT="kernel_platform/oplus/build/oplus_build_kernel.sh"
+          if [ -f "$BUILD_SCRIPT" ]; then
+            echo "=== Using OPlus build script ==="
+            chmod +x "$BUILD_SCRIPT"
+            "$BUILD_SCRIPT" $SOC perf gki 2>&1 | tee /tmp/kbuild.log
+          elif [ -f "build.sh" ]; then
+            echo "=== Using custom build.sh ==="
+            chmod +x build.sh
+            ./build.sh 2>&1 | tee /tmp/kbuild.log
+          else
+            echo "ERROR: No build script found!"
+            exit 1
+          fi
+
+          IMAGE=$(find . -path "*/arch/arm64/boot/Image" | head -n 1)
+          if [ -z "$IMAGE" ]; then
+            echo "=== BUILD FAILED — last errors ==="
+            grep -E "error:|undefined reference|FAILED" /tmp/kbuild.log | tail -60
+            exit 1
+          fi
+          echo "=== Image built: $IMAGE ==="
+          echo "IMAGE_PATH=$(realpath $IMAGE)" >> "$GITHUB_ENV"
+
+      # ── AnyKernel3 packaging ─────────────────────────────────────────────
+      - name: Package AnyKernel3
+        run: |
+          set -e
+          AK3_DIR="$HOME/AnyKernel3"
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "$AK3_DIR"
+
+          cp "$IMAGE_PATH" "$AK3_DIR/Image"
+
+          # Optional: dtb / dtbo
+          DTB=$(find kernel_src -path "*/arch/arm64/boot/dts/*.dtb" | head -n 1)
+          [ -n "$DTB" ] && cp "$DTB" "$AK3_DIR/dtb" || true
+          DTBO=$(find kernel_src -name "dtbo.img" | head -n 1)
+          [ -n "$DTBO" ] && cp "$DTBO" "$AK3_DIR/dtbo.img" || true
+
+          ZIP_NAME="dodge-${{ inputs.region }}-${{ inputs.ksu_variant }}${{ inputs.localversion }}-$(date +%Y%m%d-%H%M).zip"
+          cd "$AK3_DIR"
+          zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" . -x "*.git*" "*.github*" "README.md"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "=== Package: $ZIP_NAME ==="
+
+      # ── ccache stats ──────────────────────────────────────────────────────
+      - name: ccache Statistics
+        if: ${{ inputs.clean_build != true }}
+        run: ccache -s
+
+      # ── Upload artifact ───────────────────────────────────────────────────
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+
+      # ── Release ───────────────────────────────────────────────────────────
+      - name: Create GitHub Release
+        if: ${{ inputs.make_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="dodge-${{ inputs.region }}-${{ inputs.ksu_variant }}-$(date +%Y%m%d-%H%M)"
+          gh release create "$TAG" \
+            --title "dodge (${{ inputs.region }}) | ${{ inputs.ksu_variant }} | $(date +%Y-%m-%d)" \
+            --notes "**Device:** OnePlus 13 (dodge) — ${{ inputs.region }}
+          **KernelSU:** ${{ inputs.ksu_variant }}
+          **SuSFS branch:** ${{ inputs.susfs_branch || 'gki-android15-6.6 (auto)' }}
+          **Optimization:** ${{ inputs.optimize_level }}
+          **Version suffix:** ${{ inputs.localversion }}
+          **Built:** $(date -u '+%Y-%m-%d %H:%M UTC')" \
+            "$ZIP_NAME"
