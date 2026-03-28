@@ -176,25 +176,6 @@ jobs:
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git \
             -b "$SUSFS_BRANCH" "$SUSFS_DIR"
 
-          echo "=== Apply SuSFS patch to KernelSU ==="
-          if [ -n "$KSU_ABS" ] && [ -d "$KSU_ABS" ]; then
-            cd "$KSU_ABS"
-            patch -p1 < "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" \
-              && echo "KSU susfs patch OK" || echo "KSU susfs patch skipped"
-            cd - > /dev/null
-          fi
-
-          echo "=== Apply SuSFS patch to kernel tree ==="
-          # Try the 6.6-compatible patch name first, fall back to 5.15
-          SUSFS_KPATCH=$(ls "$SUSFS_DIR/kernel_patches/"/50_add_susfs_in_kernel-*.patch 2>/dev/null | head -n 1)
-          if [ -n "$SUSFS_KPATCH" ]; then
-            patch -p1 < "$SUSFS_KPATCH" \
-              && echo "Kernel susfs patch OK ($SUSFS_KPATCH)" \
-              || echo "Kernel susfs patch had errors (continuing)"
-          else
-            echo "WARNING: No kernel susfs patch found in $SUSFS_DIR/kernel_patches/"
-          fi
-
           echo "=== Copy SuSFS source files ==="
           cp -v "$SUSFS_DIR/kernel_patches/fs/susfs.c"               fs/
           cp -v "$SUSFS_DIR/kernel_patches/include/linux/susfs.h"     include/linux/
