@@ -1,0 +1,21 @@
+{
+  "model": "dodge",
+  "soc": "sun",
+  "manifest": "oneplus_13.xml",
+  "manifest_branch": "oneplus/sm8750",
+  "android_version": "android15",
+  "kernel_version": "6.6",
+  "os_version": "OOS16",
+  "region": "china",
+  "lto": "thin",
+  "rust_build": false,
+  "disk_cleanup": false,
+  "hmbird": true,
+  "susfs": true,
+  "bbg": true,
+  "bbr": true,
+  "ttl": true,
+  "ip_set": true,
+  "unicode": true,
+  "uname": "palaziks"
+}
