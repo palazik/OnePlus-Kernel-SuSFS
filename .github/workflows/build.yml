@@ -400,9 +400,9 @@ jobs:
 
           # ── LTO (Full Link Time Optimization) ─────────────────────────────
           CONFIG_LTO_CLANG=y
-          CONFIG_LTO_CLANG_FULL=y
+          CONFIG_LTO_CLANG_THIN=y
+          # CONFIG_LTO_CLANG_FULL is not set
           # CONFIG_LTO_CLANG_NONE is not set
-          # CONFIG_LTO_CLANG_THIN is not set
 
           # ── Compiler Optimization (O2) ────────────────────────────────────
           CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
@@ -474,7 +474,7 @@ jobs:
           cat > /tmp/AnyKernel3/anykernel.sh << 'AKEOF'
           # AnyKernel3 config — OnePlus 13 PJZ110 (GKI 2.0 / boot)
           properties() { '
-          kernel.string=palaziks God-Mode kernel
+          kernel.string=palaziks kernel
           do.devicecheck=0
           do.modules=0
           do.systemless=1
