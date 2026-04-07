@@ -274,6 +274,10 @@ jobs:
           echo "Applying HMBIRD SCX (Snapdragon 8 Elite Tweaks)..."
           dos2unix "$P/oneplus/hmbird/overwriter.patch" || true
           patch -p1 -F 3 < "$P/oneplus/hmbird/overwriter.patch" || true
+          
+          # FIX: Give the newly patched script executable permissions so Bazel doesn't crash!
+          chmod +x drivers/of/overwriter/overwrite_configs/convert_configs.sh || true
+          
           dos2unix "$P/oneplus/hmbird/hmbird_config.patch" || true
           patch -p1 -F 3 < "$P/oneplus/hmbird/hmbird_config.patch" || true
 
@@ -295,7 +299,6 @@ jobs:
               [ -f "$f" ] && { patch -p1 --forward < "$f" || true; break; }
             done
           fi
-
       # ── 12. Setup Baseband Guard (BBG) ────────────────────────────────────
       - name: Setup Baseband Guard (BBG)
         working-directory: ${{ github.workspace }}/kernel/kernel_platform
@@ -400,6 +403,10 @@ jobs:
           CONFIG_LTO_CLANG_FULL=y
           # CONFIG_LTO_CLANG_NONE is not set
           # CONFIG_LTO_CLANG_THIN is not set
+
+          # ── Compiler Optimization (O2) ────────────────────────────────────
+          CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
+          # CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3 is not set
 
           # ── Baseband Guard (BBG) ──────────────────────────────────────────
           CONFIG_BBG=y
