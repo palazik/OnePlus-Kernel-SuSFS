@@ -100,7 +100,7 @@ jobs:
       - name: Sync sources
         working-directory: /home/runner/kernel
         run: |
-          repo sync -c -j2 --force-sync --no-clone-bundle --no-tags --show-progress
+          repo sync -c -j2 --force-sync --no-clone-bundle --no-tags
           echo "Sync complete"
           df -h
 
