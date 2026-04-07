@@ -596,7 +596,7 @@ jobs:
 
             ### Flash
             ```
-            fastboot flash init_boot <patched_boot.img>
+            fastboot flash boot <patched_boot.img>
             ```
 
             > Built by @palaziks
