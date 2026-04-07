@@ -474,7 +474,7 @@ jobs:
           cat > /tmp/AnyKernel3/anykernel.sh << 'AKEOF'
           # AnyKernel3 config — OnePlus 13 PJZ110 (GKI 2.0 / boot)
           properties() { '
-          kernel.string=palaziks kernel
+          kernel.string=palaziks God-Mode kernel
           do.devicecheck=0
           do.modules=0
           do.systemless=1
@@ -494,8 +494,8 @@ jobs:
           . flash_patch_img;
           AKEOF
 
-          cp "${{ env.GITHUB_WORKSPACE }}/kernel/$FOUND_IMAGE" /tmp/AnyKernel3/Image \
-            2>/dev/null || cp "$FOUND_IMAGE" /tmp/AnyKernel3/Image
+          # THE FIX: Using the correct bash environment variable for the workspace!
+          cp "$GITHUB_WORKSPACE/kernel/$FOUND_IMAGE" /tmp/AnyKernel3/Image
 
           ZIP_NAME="OP13-PJZ110-${KVER}${W}-${MGR}-SUSFS-${DATE}.zip"
           cd /tmp/AnyKernel3
