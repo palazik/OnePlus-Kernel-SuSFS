@@ -91,14 +91,14 @@ jobs:
       # ── Repo sync ─────────────────────────────────────────────────────────
       - name: Initialize repo
         run: |
-          mkdir -p ~/kernel && cd ~/kernel
+          mkdir -p /home/runner/kernel && cd /home/runner/kernel
           repo init --depth 1 \
             -u ${{ env.KERNEL_MANIFEST_REPO }} \
             -b ${{ env.KERNEL_MANIFEST_BRANCH }} \
             -m ${{ env.KERNEL_MANIFEST_XML }}
 
       - name: Sync sources
-        working-directory: ~/kernel
+        working-directory: /home/runner/kernel
         run: |
           repo sync -c -j$(nproc --all) --force-sync \
             --no-clone-bundle --no-tags
