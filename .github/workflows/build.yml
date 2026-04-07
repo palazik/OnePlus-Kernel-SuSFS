@@ -41,7 +41,7 @@ env:
   KERNEL_MANIFEST_XML: oneplus_13.xml
   BUILD_SCRIPT: kernel_platform/oplus/build/oplus_build_kernel.sh
   BUILD_TARGET: sun perf gki
-  IMAGE_PATH: kernel_platform/out/msm-kernel-sun-perf-gki/dist/Image
+  IMAGE_PATH: .kernel_platform/out/msm-kernel-sun-perf-gki/dist/Image
   ANYKERNEL3_REPO: https://github.com/osm0sis/AnyKernel3
   ANYKERNEL3_BRANCH: master
 
