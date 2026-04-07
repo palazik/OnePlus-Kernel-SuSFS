@@ -19,6 +19,30 @@ on:
         required: true
         default: 'gki-android15-6.6'
         type: string
+      # ─── Источник ядра ────────────────────────────────────────────────────
+      # oneplus_13_b  → OnePlusOSS manifest, kernel common 6.6.89 (рекомендуется)
+      # oneplus_13    → OnePlusOSS manifest, kernel common 6.6.66 (старый, модули не работают)
+      # cctv18        → cctv18/android_kernel_common_oneplus_sm8750, тоже 6.6.89
+      kernel_source:
+        description: 'Kernel source (oneplus_13_b = 6.6.89 recommended)'
+        required: true
+        default: 'oneplus_13_b'
+        type: choice
+        options:
+          - oneplus_13_b
+          - oneplus_13
+          - cctv18
+      # ─── LTO ──────────────────────────────────────────────────────────────
+      # none   → ~25-35 мин, для разработки/тестирования
+      # thin   → ~1.5ч, для финального релиза (меньше размер, чуть быстрее)
+      lto:
+        description: 'LTO mode (none = fast dev build, thin = release)'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - thin
       watermark:
         description: 'uname watermark suffix'
         required: false
@@ -33,7 +57,6 @@ on:
 env:
   KERNEL_MANIFEST_REPO: https://github.com/OnePlusOSS/kernel_manifest.git
   KERNEL_MANIFEST_BRANCH: oneplus/sm8750
-  KERNEL_MANIFEST_XML: oneplus_13.xml
   BUILD_SCRIPT: kernel_platform/oplus/build/oplus_build_kernel.sh
   BUILD_TARGET: sun perf gki
   IMAGE_PATH: kernel_platform/out/msm-kernel-sun-perf-gki/dist/Image
@@ -41,7 +64,7 @@ env:
 
 jobs:
   build:
-    name: Build | ${{ inputs.manager }} | SuSFS=${{ inputs.susfs_branch }}
+    name: Build | ${{ inputs.manager }} | ${{ inputs.kernel_source }} | LTO=${{ inputs.lto }}
     runs-on: ubuntu-22.04
     timeout-minutes: 240
 
@@ -76,21 +99,79 @@ jobs:
           git config --global user.email "ci@palaziks.local"
           git config --global user.name "palaziks-ci"
 
-      # ── 4. Repo init ──────────────────────────────────────────────────────
-      - name: Initialize repo
+      # ── 4. Bazel remote cache (ускоряет повторные сборки) ─────────────────
+      - name: Cache Bazel artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+            /tmp/bazel-cache
+          key: bazel-op13-${{ inputs.kernel_source }}-${{ inputs.lto }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-op13-${{ inputs.kernel_source }}-${{ inputs.lto }}-
+            bazel-op13-${{ inputs.kernel_source }}-
+
+      # ── 5. Repo init & sync ───────────────────────────────────────────────
+      - name: Initialize and sync sources
         run: |
           mkdir -p $GITHUB_WORKSPACE/kernel
           cd $GITHUB_WORKSPACE/kernel
+
+          # ── Выбор XML манифеста ───────────────────────────────────────────
+          # oneplus_13_b.xml → kernel/common из OnePlusOSS на 6.6.89
+          # oneplus_13.xml   → старый, 6.6.66 (модули wifi/bt не работают!)
+          # cctv18           → самосборный manifest с cctv18 common на 6.6.89
+          case "${{ inputs.kernel_source }}" in
+            oneplus_13_b)
+              MANIFEST_XML="oneplus_13_b.xml"
+              ;;
+            oneplus_13)
+              MANIFEST_XML="oneplus_13.xml"
+              ;;
+            cctv18)
+              # Для cctv18 используем oneplus_13_b как базу,
+              # потом заменим kernel/common на cctv18 вручную
+              MANIFEST_XML="oneplus_13_b.xml"
+              ;;
+          esac
+
           repo init --depth 1 \
             -u ${{ env.KERNEL_MANIFEST_REPO }} \
             -b ${{ env.KERNEL_MANIFEST_BRANCH }} \
-            -m ${{ env.KERNEL_MANIFEST_XML }} \
+            -m "$MANIFEST_XML" \
             --repo-rev=v2.16 --no-clone-bundle --no-tags
 
-      # ── 5. Sync sources ───────────────────────────────────────────────────
-      - name: Sync sources
-        working-directory: ${{ github.workspace }}/kernel
-        run: |
+          # Если cctv18 — патчим манифест до sync: меняем remote kernel/common
+          if [ "${{ inputs.kernel_source }}" = "cctv18" ]; then
+            MANIFEST_FILE=".repo/manifests/${MANIFEST_XML}"
+            python3 << 'PYEOF'
+          import re
+
+          mf = ".repo/manifests/oneplus_13_b.xml"
+          with open(mf) as f:
+              content = f.read()
+
+          # Добавляем cctv18 remote если нет
+          if 'name="cctv18"' not in content:
+              content = content.replace(
+                  '<remote fetch="https://github.com/OnePlusOSS"',
+                  '<remote fetch="https://github.com/cctv18" name="cctv18"/>\n  <remote fetch="https://github.com/OnePlusOSS"',
+                  1
+              )
+
+          # Меняем kernel/common на cctv18 форк с 6.6.89
+          content = re.sub(
+              r'(<project[^>]*path="kernel_platform/common"[^>]*)remote="\w+"([^>]*)revision="[^"]*"',
+              r'\1remote="cctv18"\2revision="oneplus/sm8750_v_16.0.0_oneplus_13_6.6.89"',
+              content
+          )
+
+          with open(mf, "w") as f:
+              f.write(content)
+          print("Manifest patched: kernel/common → cctv18 (6.6.89)")
+          PYEOF
+          fi
+
           for i in 1 2 3; do
             repo sync -c -j$(nproc) --force-sync \
               --no-clone-bundle --no-tags --optimized-fetch && break
@@ -108,9 +189,9 @@ jobs:
             awk '/^VERSION|^PATCHLEVEL|^SUBLEVEL/{print $3}' Makefile | \
             head -3 | paste -sd '.')
           echo "version=${VER}" >> $GITHUB_OUTPUT
-          echo "Kernel: ${VER}"
+          echo "Kernel version: ${VER}"
 
-      # ── 7. Clone patch sources & BBG ──────────────────────────────────────
+      # ── 7. Clone patch sources ────────────────────────────────────────────
       - name: Clone patch sources
         run: |
           git clone --depth 1 \
@@ -146,20 +227,15 @@ jobs:
                 | bash -s main ;;
           esac
 
-      # ── 9. Multi-manager patch ────────────────────────────────────────────
-      - name: Patch multi-manager (apk_sign.c)
+      # ── 9. Multi-manager patch (apk_sign.c) ───────────────────────────────
+      # Заменяем одиночную проверку подписи APK на итерацию по массиву хэшей.
+      # ОБНОВЛЕНИЕ ХЭШЕЙ: смотри строки "-- Manager signature size/hash" в логе сборки.
+      - name: Patch multi-manager
         working-directory: ${{ github.workspace }}/kernel/kernel_platform/common
         run: |
           APK_SIGN="drivers/kernelsu/apk_sign.c"
-          if [ ! -f "$APK_SIGN" ]; then
-            echo "apk_sign.c not found, skipping multi-manager patch"
-            exit 0
-          fi
-
-          if grep -q "MULTI_MANAGER" "$APK_SIGN"; then
-            echo "Multi-manager already patched"
-            exit 0
-          fi
+          [ -f "$APK_SIGN" ] || { echo "apk_sign.c not found, skip"; exit 0; }
+          grep -q "MULTI_MANAGER" "$APK_SIGN" && { echo "Already patched"; exit 0; }
 
           python3 << 'PYEOF'
           import re, sys
@@ -169,18 +245,15 @@ jobs:
               content = f.read()
 
           if "MULTI_MANAGER" in content:
-              print("Already patched")
               sys.exit(0)
 
           HEADER = """
-          /* MULTI_MANAGER patch — palaziks */
-          #include <linux/string.h>
-
-          static const u32    ksu_mm_sizes[] = {
-              0x56d,  /* KernelSU (tiann/KernelSU) */
+          /* MULTI_MANAGER — palaziks: all known manager APK signatures */
+          static const u32 ksu_mm_sizes[] = {
+              0x56d,  /* KernelSU (tiann) */
               0x3e6,  /* KernelSU-Next */
               0x4b5,  /* SukiSU-Ultra */
-              0x4b5,  /* ReSukiSU (same base as SukiSU) */
+              0x4b5,  /* ReSukiSU */
               0x3fa,  /* WildKSU */
               0x419,  /* MKSU (5ec1cff) */
           };
@@ -195,8 +268,19 @@ jobs:
           #define KSU_MM_COUNT ARRAY_SIZE(ksu_mm_sizes)
           """
 
+          LOOP = """
+          /* MULTI_MANAGER: check all known manager APK signatures */
+          {
+              int _i;
+              for (_i = 0; _i < KSU_MM_COUNT; _i++) {
+                  if (size == ksu_mm_sizes[_i] &&
+                      !memcmp(hash, ksu_mm_hashes[_i], strlen(ksu_mm_hashes[_i])))
+                      return true;
+              }
+          }"""
+
           patterns = [
-              r'(if\s*\(\s*\w+\s*==\s*(0x[0-9a-fA-F]+|\d+)\s*&&[^)]*memcmp[^}]+return\s+true\s*;)',
+              r'(if\s*\(\s*\w+\s*==\s*(?:0x[0-9a-fA-F]+|\d+)\s*&&[^)]*memcmp[^}]+return\s+true\s*;)',
               r'(if\s*\(\s*\w+\s*==\s*expected_size\s*&&[^}]+return\s+true\s*;)',
           ]
 
@@ -204,28 +288,16 @@ jobs:
           for pat in patterns:
               m = re.search(pat, content, re.DOTALL)
               if m:
-                  new_check = """
-          /* MULTI_MANAGER: iterate over all known manager APK signatures */
-          {
-              int _mm_i;
-              u32 _hash_len = strlen(ksu_mm_hashes[0]);
-              for (_mm_i = 0; _mm_i < KSU_MM_COUNT; _mm_i++) {
-                  if (size == ksu_mm_sizes[_mm_i] &&
-                      !memcmp(hash, ksu_mm_hashes[_mm_i], _hash_len))
-                      return true;
-              }
-          }"""
-                  content = content.replace(m.group(0), new_check)
+                  content = content.replace(m.group(0), LOOP)
                   replaced = True
-                  print(f"Replaced signature check with multi-manager loop (pattern {patterns.index(pat)+1})")
                   break
 
           if not replaced:
-              print("WARNING: Could not find signature check pattern.")
+              print("WARNING: signature check pattern not found — skip")
               sys.exit(0)
 
-          last_include = max((m.end() for m in re.finditer(r'#include\s+[<"][^>"]+[>"]', content)), default=0)
-          content = content[:last_include] + "\n" + HEADER + content[last_include:]
+          last = max((m.end() for m in re.finditer(r'#include\s+[<"][^>"]+[>"]', content)), default=0)
+          content = content[:last] + "\n" + HEADER + content[last:]
 
           with open(filepath, "w") as f:
               f.write(content)
@@ -236,100 +308,91 @@ jobs:
       - name: Integrate SuSFS
         working-directory: ${{ github.workspace }}/kernel/kernel_platform/common
         run: |
-          SUSFS="$GITHUB_WORKSPACE/susfs4ksu"
+          S="$GITHUB_WORKSPACE/susfs4ksu"
+          cp "$S/kernel_patches/fs/susfs.c"              fs/ || true
+          cp "$S/kernel_patches/include/linux/susfs.h"   include/linux/ || true
+          cp "$S/kernel_patches/include/linux/susfs_def.h" include/linux/ 2>/dev/null || true
+          cp "$S/kernel_patches/fs/sus_su.c"             fs/ 2>/dev/null || true
+          cp "$S/kernel_patches/include/linux/sus_su.h"  include/linux/ 2>/dev/null || true
 
-          cp "$SUSFS/kernel_patches/fs/susfs.c"              fs/ || true
-          cp "$SUSFS/kernel_patches/include/linux/susfs.h"   include/linux/ || true
-          cp "$SUSFS/kernel_patches/include/linux/susfs_def.h" include/linux/ 2>/dev/null || true
-          cp "$SUSFS/kernel_patches/fs/sus_su.c"             fs/ 2>/dev/null || true
-          cp "$SUSFS/kernel_patches/include/linux/sus_su.h"  include/linux/ 2>/dev/null || true
-
-          PATCH_FILE="$SUSFS/kernel_patches/50_add_susfs_in_${{ inputs.susfs_branch }}.patch"
-          if [ -f "$PATCH_FILE" ]; then
-            patch -p1 --forward < "$PATCH_FILE" || \
-              echo "SuSFS patch already applied or had conflicts (continuing)"
+          PATCH="$S/kernel_patches/50_add_susfs_in_${{ inputs.susfs_branch }}.patch"
+          if [ -f "$PATCH" ]; then
+            patch -p1 --forward < "$PATCH" || echo "SuSFS patch: conflicts ignored"
           else
-            echo "Patch file not found: $PATCH_FILE"
-            ls "$SUSFS/kernel_patches/"
-            exit 1
+            echo "Patch not found: $PATCH"; ls "$S/kernel_patches/"; exit 1
           fi
 
-      # ── 11. Apply Massive Patches, Hooks, HMBIRD & Unicode ────────────────
+      # ── 11. Optional patches ──────────────────────────────────────────────
       - name: Apply optional patches
         working-directory: ${{ github.workspace }}/kernel/kernel_platform/common
         run: |
           P="$GITHUB_WORKSPACE/patches"
 
-          echo "Applying General Optimizations..."
-          patch -p1 --forward < "$P/common/optimized_mem_operations.patch" || true
-          patch -p1 --forward < "$P/common/file_struct_8bytes_align.patch" || true
-          patch -p1 --forward < "$P/common/reduce_cache_pressure.patch" || true
-          patch -p1 --forward < "$P/common/mem_opt_prefetch.patch" || true
-          patch -p1 --forward < "$P/common/minimise_wakeup_time.patch" || true
-          patch -p1 --forward < "$P/common/int_sqrt.patch" || true
-          patch -p1 --forward < "$P/common/force_tcp_nodelay.patch" || true
-          patch -p1 --forward < "$P/common/reduce_gc_thread_sleep_time.patch" || true
-          patch -p1 --forward < "$P/common/f2fs_reduce_congestion.patch" || true
-          
-          echo "Applying HMBIRD SCX (Snapdragon 8 Elite Tweaks)..."
-          dos2unix "$P/oneplus/hmbird/overwriter.patch" || true
-          patch -p1 -F 3 < "$P/oneplus/hmbird/overwriter.patch" || true
-          
-          # FIX: Give the newly patched script executable permissions so Bazel doesn't crash!
-          chmod +x drivers/of/overwriter/overwrite_configs/convert_configs.sh || true
-          
-          dos2unix "$P/oneplus/hmbird/hmbird_config.patch" || true
-          patch -p1 -F 3 < "$P/oneplus/hmbird/hmbird_config.patch" || true
+          echo "==> General optimizations"
+          for f in optimized_mem_operations file_struct_8bytes_align \
+                   reduce_cache_pressure mem_opt_prefetch minimise_wakeup_time \
+                   int_sqrt force_tcp_nodelay reduce_gc_thread_sleep_time \
+                   f2fs_reduce_congestion; do
+            [ -f "$P/common/${f}.patch" ] && \
+              { patch -p1 --forward < "$P/common/${f}.patch" || true; }
+          done
 
-          echo "Skipping Ptrace Leak Fix (Not needed on Kernel 6.6, would break build)"
+          echo "==> HMBIRD SCX"
+          for f in overwriter hmbird_config; do
+            pf="$P/oneplus/hmbird/${f}.patch"
+            if [ -f "$pf" ]; then
+              dos2unix "$pf" || true
+              patch -p1 -F 3 < "$pf" || true
+            fi
+          done
+          # Fix: Bazel требует executable bit на скриптах
+          chmod +x drivers/of/overwriter/overwrite_configs/convert_configs.sh 2>/dev/null || true
 
-          echo "Applying Unicode Fix (Kernel 6.1+)..."
-          for f in \
-            "$P/common/unicode_bypass_fix_6.1+.patch" \
-            "$P/common/unicode.patch"; do
+          echo "==> Unicode fix"
+          for f in "$P/common/unicode_bypass_fix_6.1+.patch" \
+                   "$P/common/unicode.patch"; do
             [ -f "$f" ] && { patch -p1 --forward < "$f" || true; break; }
           done
 
-          echo "Applying Manual VFS hooks..."
+          echo "==> Manual VFS hooks (KernelSU-Next / WildKSU)"
           if [[ "${{ inputs.manager }}" == "KernelSU-Next" || \
                 "${{ inputs.manager }}" == "WildKSU" ]]; then
-            for f in \
-              "$P/next/scope_min_manual_hooks_v1.4.patch" \
-              "$P/next/manual_hooks.patch"; do
+            for f in "$P/next/scope_min_manual_hooks_v1.4.patch" \
+                     "$P/next/manual_hooks.patch"; do
               [ -f "$f" ] && { patch -p1 --forward < "$f" || true; break; }
             done
           fi
-      # ── 12. Setup Baseband Guard (BBG) ────────────────────────────────────
-      - name: Setup Baseband Guard (BBG)
+
+      # ── 12. Baseband Guard (BBG) ──────────────────────────────────────────
+      - name: Setup Baseband Guard
         working-directory: ${{ github.workspace }}/kernel/kernel_platform
         run: |
           bash $GITHUB_WORKSPACE/bbg/setup.sh main || true
           cd common
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig || true
-          patch -p1 --forward < $GITHUB_WORKSPACE/patches/experimental/bbg/bbg_fix_get_link.patch || true
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' \
+            security/Kconfig || true
+          patch -p1 --forward < \
+            $GITHUB_WORKSPACE/patches/experimental/bbg/bbg_fix_get_link.patch || true
 
       # ── 13. Watermark ─────────────────────────────────────────────────────
       - name: Set uname watermark
         working-directory: ${{ github.workspace }}/kernel/kernel_platform/common
         run: |
           W="${{ inputs.watermark }}"
-
           if grep -q "^LOCALVERSION" Makefile; then
             sed -i "s/^LOCALVERSION.*/LOCALVERSION = ${W}/" Makefile
           else
             sed -i "/^SUBLEVEL/a LOCALVERSION = ${W}" Makefile
           fi
-
           if [ -f scripts/setlocalversion ]; then
-            sed -i 's/res="\${res}.*"/res="${res}'"${W}"'"/' \
-              scripts/setlocalversion 2>/dev/null || true
+            sed -i 's/res="\${res}.*"/res="${res}'"${W}"'"/' scripts/setlocalversion 2>/dev/null || true
             sed -i 's/ -dirty//' scripts/setlocalversion 2>/dev/null || true
           fi
 
-          echo "Watermark: ${W}"
-
-      # ── 14. Write Vendor Config Fragment (LTO, BBG, BBR, KSU) ─────────────
-      - name: Write KSU+SuSFS vendor config fragment
+      # ── 14. Vendor config fragment ────────────────────────────────────────
+      # ВСЕ KSU/SuSFS конфиги идут ТОЛЬКО сюда.
+      # В gki_defconfig ничего не пишем — Bazel/kleaf сломает savedefconfig.
+      - name: Write vendor config fragment
         run: |
           KDIR="$GITHUB_WORKSPACE/kernel"
 
@@ -338,34 +401,38 @@ jobs:
             "kernel_platform/msm-kernel/arch/arm64/configs/vendor/sun_GKI.config" \
             "kernel_platform/msm-kernel/arch/arm64/configs/sun_GKI.config" \
             "kernel_platform/common/arch/arm64/configs/vendor/sun_GKI.config"; do
-            if [ -f "$KDIR/$f" ]; then
-              VENDOR_CONFIG="$KDIR/$f"
-              echo "Using existing vendor fragment: $f"
-              break
-            fi
+            [ -f "$KDIR/$f" ] && { VENDOR_CONFIG="$KDIR/$f"; echo "Fragment: $f"; break; }
           done
 
           if [ -z "$VENDOR_CONFIG" ]; then
-            VENDOR_DIR="$KDIR/kernel_platform/msm-kernel/arch/arm64/configs/vendor"
-            mkdir -p "$VENDOR_DIR"
-            VENDOR_CONFIG="$VENDOR_DIR/palaziks_ksu.config"
-            echo "# palaziks KSU/SuSFS override fragment" > "$VENDOR_CONFIG"
-            echo "Created: $VENDOR_CONFIG"
-
+            VDIR="$KDIR/kernel_platform/msm-kernel/arch/arm64/configs/vendor"
+            mkdir -p "$VDIR"
+            VENDOR_CONFIG="$VDIR/palaziks_ksu.config"
+            echo "# palaziks fragment" > "$VENDOR_CONFIG"
+            # Регистрируем в BUILD.bazel
             BUILD="$KDIR/kernel_platform/msm-kernel/BUILD.bazel"
-            if [ -f "$BUILD" ] && ! grep -q "palaziks_ksu.config" "$BUILD"; then
-              sed -i \
-                '/sun_GKI\.config/a\        "arch/arm64/configs/vendor/palaziks_ksu.config",' \
-                "$BUILD" 2>/dev/null || \
-              sed -i \
-                '/kconfig_ext\s*=\s*\[/a\        "arch/arm64/configs/vendor/palaziks_ksu.config",' \
+            if [ -f "$BUILD" ] && ! grep -q "palaziks_ksu" "$BUILD"; then
+              sed -i '/sun_GKI\.config/a\        "arch/arm64/configs/vendor/palaziks_ksu.config",' \
                 "$BUILD" 2>/dev/null || true
-              echo "Registered in BUILD.bazel"
             fi
           fi
 
-          cat >> "$VENDOR_CONFIG" << 'FRAGEOF'
-          # ── KernelSU core ─────────────────────────────────────────────────
+          # ── LTO ───────────────────────────────────────────────────────────
+          # none → быстро (~25-35 мин), для разработки
+          # thin → ~1.5ч, для релиза
+          if [ "${{ inputs.lto }}" = "none" ]; then
+            LTO_BLOCK="CONFIG_LTO_CLANG_NONE=y
+          # CONFIG_LTO_CLANG_THIN is not set
+          # CONFIG_LTO_CLANG_FULL is not set"
+          else
+            LTO_BLOCK="CONFIG_LTO_CLANG=y
+          CONFIG_LTO_CLANG_THIN=y
+          # CONFIG_LTO_CLANG_NONE is not set
+          # CONFIG_LTO_CLANG_FULL is not set"
+          fi
+
+          cat >> "$VENDOR_CONFIG" << FRAGEOF
+          # ── KernelSU ──────────────────────────────────────────────────────
           CONFIG_KSU=y
           CONFIG_KSU_DEBUG=n
 
@@ -377,7 +444,6 @@ jobs:
           CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
           CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          # CONFIG_KSU_SUSFS_SUS_OVERLAYFS is not set
           CONFIG_KSU_SUSFS_TRY_UMOUNT=y
           CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
@@ -386,7 +452,6 @@ jobs:
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
-          # CONFIG_KSU_SUSFS_SUS_SU is not set
 
           # ── Filesystem (Mountify) ─────────────────────────────────────────
           CONFIG_TMPFS_XATTR=y
@@ -398,40 +463,40 @@ jobs:
           CONFIG_NET_SCH_FQ=y
           CONFIG_NET_SCH_FQ_CODEL=y
 
-          # ── LTO (Full Link Time Optimization) ─────────────────────────────
-          CONFIG_LTO_CLANG=y
-          CONFIG_LTO_CLANG_THIN=y
-          # CONFIG_LTO_CLANG_FULL is not set
-          # CONFIG_LTO_CLANG_NONE is not set
-
-          # ── Compiler Optimization (O2) ────────────────────────────────────
-          CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
-          # CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3 is not set
-
-          # ── Baseband Guard (BBG) ──────────────────────────────────────────
+          # ── BBG ───────────────────────────────────────────────────────────
           CONFIG_BBG=y
+
+          # ── LTO ───────────────────────────────────────────────────────────
+          ${LTO_BLOCK}
           FRAGEOF
 
           if [[ "${{ inputs.manager }}" == "SukiSU-Ultra" || \
                 "${{ inputs.manager }}" == "ReSukiSU" ]]; then
             cat >> "$VENDOR_CONFIG" << 'KPMEOF'
-          # ── KPM (SukiSU-Ultra / ReSukiSU) ────────────────────────────────
+          # ── KPM ───────────────────────────────────────────────────────────
           CONFIG_KPM=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
           KPMEOF
           fi
 
-          echo "Vendor config fragment:"
-          tail -50 "$VENDOR_CONFIG"
+          echo "=== Vendor fragment tail ==="
+          tail -30 "$VENDOR_CONFIG"
 
-      # ── 15. Build kernel ──────────────────────────────────────────────────
+      # ── 15. Build ─────────────────────────────────────────────────────────
       - name: Build kernel
         working-directory: ${{ github.workspace }}/kernel
         run: |
           export LOCALVERSION="${{ inputs.watermark }}"
           export KBUILD_BUILD_USER="palaziks"
           export KBUILD_BUILD_HOST="github-ci"
+          # Bazel remote cache dir
+          export BAZEL_CACHE_DIR=/tmp/bazel-cache
+
+          # LTO_NONE через env (Bazel читает его для kleaf)
+          if [ "${{ inputs.lto }}" = "none" ]; then
+            export LTO=none
+          fi
 
           bash ${{ env.BUILD_SCRIPT }} ${{ env.BUILD_TARGET }} \
             2>&1 | tee /tmp/build.log
@@ -440,16 +505,11 @@ jobs:
           for IMG in \
             "${{ env.IMAGE_PATH }}" \
             "kernel_platform/out/msm-kernel-sun-perf/dist/Image" \
-            "kernel_platform/out/dist/Image" \
-            "out/msm-kernel-sun-perf-gki/dist/Image"; do
-            if [ -f "$IMG" ]; then
-              FOUND="$IMG"
-              echo "Image found: $FOUND"
-              ls -lh "$FOUND"
-              break
-            fi
+            "kernel_platform/out/dist/Image"; do
+            [ -f "$IMG" ] && { FOUND="$IMG"; break; }
           done
           [ -n "$FOUND" ] || { echo "ERROR: Image not found!"; exit 1; }
+          echo "Image: $FOUND ($(du -sh $FOUND | cut -f1))"
           echo "FOUND_IMAGE=$FOUND" >> $GITHUB_ENV
 
       # ── 16. Upload build log ──────────────────────────────────────────────
@@ -457,7 +517,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-${{ inputs.manager }}-${{ github.run_number }}
+          name: build-log-${{ inputs.manager }}-${{ inputs.kernel_source }}-${{ github.run_number }}
           path: /tmp/build.log
           retention-days: 7
 
@@ -467,12 +527,12 @@ jobs:
           KVER="${{ steps.kver.outputs.version }}"
           W="${{ inputs.watermark }}"
           MGR="${{ inputs.manager }}"
+          LTO="${{ inputs.lto }}"
           DATE=$(date +%Y%m%d-%H%M)
 
           git clone --depth 1 ${{ env.ANYKERNEL3_REPO }} /tmp/AnyKernel3
 
           cat > /tmp/AnyKernel3/anykernel.sh << 'AKEOF'
-          # AnyKernel3 config — OnePlus 13 PJZ110 (GKI 2.0 / boot)
           properties() { '
           kernel.string=palaziks kernel
           do.devicecheck=0
@@ -485,7 +545,7 @@ jobs:
           device.name3=oneplus13
           supported.versions=15-
           '; }
-          block=/dev/block/bootdevice/by-name/boot;
+          block=/dev/block/bootdevice/by-name/init_boot;
           is_slot_device=1;
           ramdisk_compression=auto;
           patch_vbmeta_flag=auto;
@@ -494,10 +554,9 @@ jobs:
           . flash_patch_img;
           AKEOF
 
-          # THE FIX: Using the correct bash environment variable for the workspace!
           cp "$GITHUB_WORKSPACE/kernel/$FOUND_IMAGE" /tmp/AnyKernel3/Image
 
-          ZIP_NAME="OP13-PJZ110-${KVER}${W}-${MGR}-SUSFS-${DATE}.zip"
+          ZIP_NAME="OP13-PJZ110-${KVER}${W}-${MGR}-SuSFS-LTO${LTO^^}-${DATE}.zip"
           cd /tmp/AnyKernel3
           zip -r9 "/tmp/${ZIP_NAME}" . -x "*.git*" "*.github*" "*.md"
           ls -lh "/tmp/${ZIP_NAME}"
@@ -514,13 +573,13 @@ jobs:
           retention-days: 30
           compression-level: 0
 
-      # ── 19. GitHub Release (optional) ─────────────────────────────────────
+      # ── 19. GitHub Release ────────────────────────────────────────────────
       - name: Create GitHub Release
         if: inputs.upload_release == true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.kver.outputs.version }}-${{ inputs.manager }}-${{ github.run_number }}
-          name: "OnePlus 13 PJZ110 · ${{ steps.kver.outputs.version }}${{ inputs.watermark }} · ${{ inputs.manager }}"
+          name: "OP13 PJZ110 · ${{ steps.kver.outputs.version }}${{ inputs.watermark }} · ${{ inputs.manager }}"
           body: |
             ## OnePlus 13 (PJZ110) — palaziks kernel
 
@@ -529,14 +588,15 @@ jobs:
             | **Device** | OnePlus 13 PJZ110 (CN) |
             | **SoC** | Snapdragon 8 Elite SM8750 |
             | **Kernel** | `${{ steps.kver.outputs.version }}${{ inputs.watermark }}` |
+            | **Source** | `${{ inputs.kernel_source }}` |
             | **Manager** | `${{ inputs.manager }}` |
             | **SuSFS** | `${{ inputs.susfs_branch }}` |
+            | **LTO** | `${{ inputs.lto }}` |
             | **Multi-manager** | SukiSU-Ultra / ReSukiSU / KernelSU / KernelSU-Next / WildKSU |
 
             ### Flash
             ```
-            fastboot flash boot <patched_boot.img>
-            # или AnyKernel3 через TWRP / KernelFlasher
+            fastboot flash init_boot <patched_init_boot.img>
             ```
 
             > Built by @palaziks
