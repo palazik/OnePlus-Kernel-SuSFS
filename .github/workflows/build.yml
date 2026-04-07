@@ -52,7 +52,7 @@ jobs:
     timeout-minutes: 240
 
     steps:
-      # ── Свободное место ───────────────────────────────────────────────────
+      # ── Free Disk Space ───────────────────────────────────────────────────
       - name: Free disk space
         run: |
           sudo apt-get remove -y '^dotnet-.*' '^llvm-.*' 'php.*' '^mongodb-.*' \
@@ -63,7 +63,7 @@ jobs:
             /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h
 
-      # ── Зависимости ───────────────────────────────────────────────────────
+      # ── Dependencies ──────────────────────────────────────────────────────
       - name: Install dependencies
         run: |
           sudo apt-get update -q
@@ -71,9 +71,9 @@ jobs:
             git repo python3 python3-pip curl wget zip unzip bc \
             bison flex libssl-dev libelf-dev libncurses-dev \
             build-essential ca-certificates cpio rsync \
-            ccache lz4 zstd
+            ccache lz4 zstd dos2unix
 
-      # ── Настройка ccache ──────────────────────────────────────────────────
+      # ── Setup ccache ──────────────────────────────────────────────────────
       - name: Setup ccache
         uses: actions/cache@v4
         with:
@@ -88,7 +88,7 @@ jobs:
           ccache --max-size=5G
           ccache --zero-stats
 
-      # ── Repo sync ─────────────────────────────────────────────────────────
+      # ── Repo Init & Robust Sync ───────────────────────────────────────────
       - name: Initialize repo
         run: |
           mkdir -p /home/runner/kernel && cd /home/runner/kernel
@@ -100,7 +100,7 @@ jobs:
       - name: Sync sources
         working-directory: /home/runner/kernel
         run: |
-          echo "Starting sync..."
+          echo "Starting robust sync..."
           success=false
           for i in 1 2 3; do
             if repo sync -c -j2 --no-clone-bundle --no-tags --optimized-fetch --fail-fast; then
@@ -114,10 +114,10 @@ jobs:
           echo "Sync complete"
           df -h
 
-      # ── Определяем версию ядра ────────────────────────────────────────────
+      # ── Kernel Version ────────────────────────────────────────────────────
       - name: Get kernel version
         id: kver
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
           VER=$(make kernelversion 2>/dev/null || cat Makefile | \
             awk '/^VERSION|^PATCHLEVEL|^SUBLEVEL/{print $3}' | \
@@ -125,160 +125,178 @@ jobs:
           echo "version=${VER}" >> $GITHUB_OUTPUT
           echo "Kernel version: ${VER}"
 
-      # ── Интегрируем KSU менеджер ──────────────────────────────────────────
+      # ── Clone Advanced Patches ────────────────────────────────────────────
+      - name: Clone Kernel Patches & BBG
+        run: |
+          git clone --depth 1 https://github.com/TheWildJames/kernel_patches.git /tmp/kernel_patches
+          git clone --depth 1 https://github.com/vc-teahouse/Baseband-guard.git /tmp/Baseband-guard
+
+      # ── Setup KSU Manager ─────────────────────────────────────────────────
       - name: Setup KSU — SukiSU-Ultra
         if: inputs.manager == 'SukiSU-Ultra'
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
             | bash -s susfs-main
 
       - name: Setup KSU — ReSukiSU
         if: inputs.manager == 'ReSukiSU'
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
           curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" \
             | bash -s main
 
       - name: Setup KSU — KernelSU
         if: inputs.manager == 'KernelSU'
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
             | bash -s main
 
       - name: Setup KSU — KernelSU-Next
         if: inputs.manager == 'KernelSU-Next'
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s next
 
       - name: Setup KSU — WildKSU
         if: inputs.manager == 'WildKSU'
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
           curl -LSs "https://raw.githubusercontent.com/WildPlusKernel/KernelSU/main/kernel/setup.sh" \
             | bash -s main
 
-      # ── SuSFS ─────────────────────────────────────────────────────────────
+      # ── Apply Massive Patch Suite & Optimizations ─────────────────────────
+      - name: Apply Optimizations & Patches
+        working-directory: /home/runner/kernel/kernel_platform/common
+        run: |
+          echo "Applying General Optimizations..."
+          patch -p1 --forward < /tmp/kernel_patches/common/optimized_mem_operations.patch || true
+          patch -p1 --forward < /tmp/kernel_patches/common/file_struct_8bytes_align.patch || true
+          patch -p1 --forward < /tmp/kernel_patches/common/reduce_cache_pressure.patch || true
+          patch -p1 --forward < /tmp/kernel_patches/common/mem_opt_prefetch.patch || true
+          patch -p1 --forward < /tmp/kernel_patches/common/minimise_wakeup_time.patch || true
+          patch -p1 --forward < /tmp/kernel_patches/common/int_sqrt.patch || true
+          patch -p1 --forward < /tmp/kernel_patches/common/force_tcp_nodelay.patch || true
+          patch -p1 --forward < /tmp/kernel_patches/common/reduce_gc_thread_sleep_time.patch || true
+          patch -p1 --forward < /tmp/kernel_patches/common/f2fs_reduce_congestion.patch || true
+          
+          echo "Applying HMBIRD SCX (Snapdragon 8 Elite Tweaks)..."
+          dos2unix /tmp/kernel_patches/oneplus/hmbird/overwriter.patch || true
+          patch -p1 -F 3 < /tmp/kernel_patches/oneplus/hmbird/overwriter.patch || true
+          dos2unix /tmp/kernel_patches/oneplus/hmbird/hmbird_config.patch || true
+          patch -p1 -F 3 < /tmp/kernel_patches/oneplus/hmbird/hmbird_config.patch || true
+          
+          echo "Applying Unicode Fix (Kernel 6.1+)..."
+          patch -p1 --forward < /tmp/kernel_patches/common/unicode_bypass_fix_6.1+.patch || true
+
+      # ── SuSFS Integration ─────────────────────────────────────────────────
       - name: Integrate SuSFS
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
           SUSFS_BRANCH="${{ inputs.susfs_branch }}"
-          git clone --depth 1 \
-            -b "${SUSFS_BRANCH}" \
-            https://github.com/sidex15/susfs4ksu \
-            /tmp/susfs4ksu || \
-          git clone --depth 1 \
-            -b "${SUSFS_BRANCH}" \
-            https://github.com/simonpunk/susfs4ksu \
-            /tmp/susfs4ksu
+          git clone --depth 1 -b "${SUSFS_BRANCH}" https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu || true
 
-          # Патчим ядро
-          KSU_DIR="$(find . -maxdepth 4 -name 'setup.sh' -path '*/kernelsu/*' \
-            -exec dirname {} \; 2>/dev/null | head -1 || true)"
-
-          cp /tmp/susfs4ksu/kernel_patches/fs/susfs.c               fs/
-          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h    include/linux/
+          cp /tmp/susfs4ksu/kernel_patches/fs/susfs.c               fs/ || true
+          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h    include/linux/ || true
           cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/ 2>/dev/null || true
           cp /tmp/susfs4ksu/kernel_patches/fs/sus_su.c              fs/ 2>/dev/null || true
           cp /tmp/susfs4ksu/kernel_patches/include/linux/sus_su.h   include/linux/ 2>/dev/null || true
 
-          # Применяем патч на fs/Makefile и fs/Kconfig
           PATCH_DIR=/tmp/susfs4ksu/kernel_patches
           if ls "${PATCH_DIR}"/*.patch &>/dev/null; then
             for p in "${PATCH_DIR}"/*.patch; do
-              patch -p1 --forward --reject-file=/dev/null < "$p" || \
-                echo "Patch $p already applied or skipped"
+              patch -p1 --forward --reject-file=/dev/null < "$p" || echo "Patch $p skipped"
             done
           fi
-
+          
           echo "SuSFS integrated (branch: ${SUSFS_BRANCH})"
 
-      # ── KPM конфиг ───────────────────────────────────────────────────────
+      # ── Manual KSU Hooks ──────────────────────────────────────────────────
+      - name: Apply Manual KSU Hooks
+        working-directory: /home/runner/kernel/kernel_platform/common
+        run: |
+          echo "Applying Manual Hooks..."
+          patch -p1 < /tmp/kernel_patches/next/scope_min_manual_hooks_v1.4.patch || true
+
+      # ── Configure Advanced Features (BBR, BBG, LTO) ───────────────────────
+      - name: Configure Advanced Features
+        run: |
+          DEFCONFIG="/home/runner/kernel/kernel_platform/common/arch/arm64/configs/gki_defconfig"
+          
+          echo "Enabling BBRv1..."
+          cat >> "$DEFCONFIG" <<EOF
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_NET_SCH_FQ=y
+          CONFIG_NET_SCH_FQ_CODEL=y
+          EOF
+          
+          echo "Enabling Baseband Guard (BBG)..."
+          cd /home/runner/kernel/kernel_platform
+          bash /tmp/Baseband-guard/setup.sh main || true
+          cd common
+          echo "CONFIG_BBG=y" >> "$DEFCONFIG"
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig || true
+          patch -p1 --forward < /tmp/kernel_patches/experimental/bbg/bbg_fix_get_link.patch || true
+
+          echo "Applying LTO (Full Link Time Optimization)..."
+          echo "CONFIG_LTO_CLANG=y" >> "$DEFCONFIG"
+          echo "CONFIG_LTO_CLANG_FULL=y" >> "$DEFCONFIG"
+
+      # ── KPM Config ────────────────────────────────────────────────────────
       - name: Enable KPM config
         if: inputs.kpm == true && inputs.manager == 'SukiSU-Ultra'
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
-          # Добавляем в oplus-specific defconfig если есть, иначе в gki
-          DEFCONFIGS=(
-            "arch/arm64/configs/gki_defconfig"
-            "arch/arm64/configs/vendor/sun_GKI.config"
-          )
+          DEFCONFIGS=("arch/arm64/configs/gki_defconfig" "arch/arm64/configs/vendor/sun_GKI.config")
           for DEF in "${DEFCONFIGS[@]}"; do
             if [ -f "$DEF" ]; then
-              grep -q "CONFIG_KPM" "$DEF" || \
-                echo "CONFIG_KPM=y" >> "$DEF"
-              grep -q "CONFIG_KALLSYMS_ALL" "$DEF" || \
-                echo "CONFIG_KALLSYMS_ALL=y" >> "$DEF"
-              echo "KPM added to $DEF"
+              grep -q "CONFIG_KPM" "$DEF" || echo "CONFIG_KPM=y" >> "$DEF"
+              grep -q "CONFIG_KALLSYMS_ALL" "$DEF" || echo "CONFIG_KALLSYMS_ALL=y" >> "$DEF"
             fi
           done
 
-      # ── Мульти-менеджер (разрешаем несколько UID менеджеров) ──────────────
+      # ── Multi-Manager Patch ───────────────────────────────────────────────
       - name: Patch multi-manager support
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
-          # Снимаем ограничение на один менеджер: разрешаем разные пакеты
-          # управлять ядром через ksu_allow_uid/setup_manager_uid
           KSUD_SYSCTL="drivers/kernelsu/core_hook.c"
           if [ -f "$KSUD_SYSCTL" ]; then
-            # Убираем хардкод пакетного имени если присутствует
-            sed -i 's/strcmp(task_comm, "com.rsuntk.ksu")/1 \/\* multi-manager \*\//g' \
-              "$KSUD_SYSCTL" 2>/dev/null || true
+            sed -i 's/strcmp(task_comm, "com.rsuntk.ksu")/1 \/\* multi-manager \*\//g' "$KSUD_SYSCTL" 2>/dev/null || true
           fi
-
-          # Патч setup_manager через sysctl для поддержки WildKSU/MKSU/KSU/SukiSU одновременно
-          # (фактически реализуется на уровне менеджера, ядро должно просто
-          #  принимать любой UID как manager — удаляем жёсткий фильтр если есть)
           KSU_ALLOWLIST="drivers/kernelsu/allowlist.c"
           if [ -f "$KSU_ALLOWLIST" ]; then
             grep -q "multi_manager" "$KSU_ALLOWLIST" || \
-              sed -i '/ksu_is_manager_uid_valid/a \ \ /* multi-manager: accept any pre-granted manager uid */' \
-              "$KSU_ALLOWLIST" 2>/dev/null || true
+              sed -i '/ksu_is_manager_uid_valid/a \ \ /* multi-manager: accept any pre-granted manager uid */' "$KSU_ALLOWLIST" 2>/dev/null || true
           fi
 
-          echo "Multi-manager patch applied"
-
-      # ── Watermark в uname ─────────────────────────────────────────────────
+      # ── Set Uname Watermark ───────────────────────────────────────────────
       - name: Set uname watermark
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
           WATERMARK="${{ inputs.watermark }}"
-          # 1) LOCALVERSION через Makefile
           if grep -q "^LOCALVERSION" Makefile; then
             sed -i "s/^LOCALVERSION.*/LOCALVERSION = ${WATERMARK}/" Makefile
           else
             echo "LOCALVERSION = ${WATERMARK}" >> Makefile
           fi
-
-          # 2) scripts/setlocalversion — фиксируем суффикс, убираем git хэш
           if [ -f scripts/setlocalversion ]; then
-            sed -i 's/res="\${res}.*$/res="${res}'"${WATERMARK}"'"/' \
-              scripts/setlocalversion 2>/dev/null || true
+            sed -i 's/res="\${res}.*$/res="${res}'"${WATERMARK}"'"/' scripts/setlocalversion 2>/dev/null || true
           fi
-
-          # 3) CONFIG_LOCALVERSION в defconfig
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
-          if [ -f "$DEFCONFIG" ]; then
-            if grep -q "CONFIG_LOCALVERSION=" "$DEFCONFIG"; then
-              sed -i "s/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"${WATERMARK}\"/" \
-                "$DEFCONFIG"
-            else
-              echo "CONFIG_LOCALVERSION=\"${WATERMARK}\"" >> "$DEFCONFIG"
-            fi
+          if grep -q "CONFIG_LOCALVERSION=" "$DEFCONFIG"; then
+            sed -i "s/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"${WATERMARK}\"/" "$DEFCONFIG"
+          else
+            echo "CONFIG_LOCALVERSION=\"${WATERMARK}\"" >> "$DEFCONFIG"
           fi
 
-          echo "Watermark set: ${WATERMARK}"
-
-      # ── Дополнительные конфиги ────────────────────────────────────────────
+      # ── Extra Kernel Configs ──────────────────────────────────────────────
       - name: Extra kernel configs (SUSFS + KSU)
-        working-directory: ~/kernel/kernel_platform/common
+        working-directory: /home/runner/kernel/kernel_platform/common
         run: |
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
-          [ -f "$DEFCONFIG" ] || exit 0
-
           declare -A CONFIGS=(
             ["CONFIG_KSU"]="y"
             ["CONFIG_KSU_SUSFS"]="y"
@@ -291,9 +309,9 @@ jobs:
             ["CONFIG_KSU_SUSFS_ENABLE_LOG"]="y"
             ["CONFIG_KSU_SUSFS_OPEN_REDIRECT"]="y"
             ["CONFIG_TMPFS_XATTR"]="y"
+            ["CONFIG_TMPFS_POSIX_ACL"]="y"
             ["CONFIG_POSIX_ACL"]="y"
           )
-
           for KEY in "${!CONFIGS[@]}"; do
             VAL="${CONFIGS[$KEY]}"
             if grep -q "^${KEY}=" "$DEFCONFIG"; then
@@ -303,11 +321,9 @@ jobs:
             fi
           done
 
-          echo "Kernel configs applied"
-
-      # ── Сборка ────────────────────────────────────────────────────────────
+      # ── Build Kernel ──────────────────────────────────────────────────────
       - name: Build kernel
-        working-directory: ~/kernel
+        working-directory: /home/runner/kernel
         env:
           CCACHE_DIR: ~/.ccache
           USE_CCACHE: 1
@@ -316,13 +332,10 @@ jobs:
           export CC="ccache clang"
           export PATH="/usr/lib/ccache:$PATH"
 
-          # Запуск через oplus build script
-          bash ${{ env.BUILD_SCRIPT }} ${{ env.BUILD_TARGET }} 2>&1 | \
-            tee /tmp/build.log
+          bash ${{ env.BUILD_SCRIPT }} ${{ env.BUILD_TARGET }} 2>&1 | tee /tmp/build.log
 
           echo "=== Build done ==="
           ls -lh ${{ env.IMAGE_PATH }} || {
-            # Fallback: поиск Image
             find . -name "Image" -not -path "*/\.*" | head -5
             exit 1
           }
@@ -330,7 +343,7 @@ jobs:
       - name: Show ccache stats
         run: ccache --show-stats
 
-      # ── Сохраняем лог сборки ──────────────────────────────────────────────
+      # ── Upload Build Log ──────────────────────────────────────────────────
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -339,7 +352,7 @@ jobs:
           path: /tmp/build.log
           retention-days: 7
 
-      # ── Пакетируем в AnyKernel3 ───────────────────────────────────────────
+      # ── Package with AnyKernel3 ───────────────────────────────────────────
       - name: Package with AnyKernel3
         run: |
           MANAGER="${{ inputs.manager }}"
@@ -347,12 +360,8 @@ jobs:
           KVER="${{ steps.kver.outputs.version }}"
           DATE=$(date +%Y%m%d-%H%M)
 
-          git clone --depth 1 \
-            -b ${{ env.ANYKERNEL3_BRANCH }} \
-            ${{ env.ANYKERNEL3_REPO }} \
-            /tmp/AnyKernel3
+          git clone --depth 1 -b ${{ env.ANYKERNEL3_BRANCH }} ${{ env.ANYKERNEL3_REPO }} /tmp/AnyKernel3
 
-          # Минимальный anykernel.sh для OnePlus 13 GKI 2.0
           cat > /tmp/AnyKernel3/anykernel.sh << 'AKEOF'
           # AnyKernel3 config — OnePlus 13 (PJZ110) GKI 2.0
           properties() { '
@@ -375,7 +384,7 @@ jobs:
           . flash_patch_img;
           AKEOF
 
-          cp ${{ env.IMAGE_PATH }} /tmp/AnyKernel3/Image
+          cp /home/runner/kernel/${{ env.IMAGE_PATH }} /tmp/AnyKernel3/Image
 
           ZIP_NAME="OnePlus13-PJZ110-${KVER}${WATERMARK}-${MANAGER}-SUSFS-${DATE}.zip"
           cd /tmp/AnyKernel3
@@ -383,9 +392,8 @@ jobs:
 
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
           echo "ZIP_PATH=/tmp/${ZIP_NAME}" >> $GITHUB_ENV
-          ls -lh "/tmp/${ZIP_NAME}"
 
-      # ── Загружаем артефакт ────────────────────────────────────────────────
+      # ── Upload Artifact ───────────────────────────────────────────────────
       - name: Upload kernel zip
         uses: actions/upload-artifact@v4
         with:
@@ -394,7 +402,7 @@ jobs:
           retention-days: 30
           compression-level: 0
 
-      # ── GitHub Release (опционально) ──────────────────────────────────────
+      # ── GitHub Release ────────────────────────────────────────────────────
       - name: Create GitHub Release
         if: inputs.upload_release == true
         uses: softprops/action-gh-release@v2
@@ -416,18 +424,26 @@ jobs:
             | **KPM** | `${{ inputs.kpm }}` |
             | **Build** | `#${{ github.run_number }}` |
 
-            ### Supported managers (multi-manager)
+            ### 🚀 Integrated Features
+            *   **Massive Optimization Suite** (Memory, I/O, Cache)
+            *   **HMBIRD SCX** (Snapdragon 8 Elite Tweaks)
+            *   **LTO** (Full Link Time Optimization)
+            *   **BBRv1** (Advanced TCP Congestion Control)
+            *   **Baseband Guard (BBG)** (LSM Baseband Security)
+            *   **Manual KSU Hooks** (Better Stealth)
+            *   **Unicode Bypass Fix**
+
+            ### 📱 Supported Managers (Multi-manager)
             - SukiSU-Ultra
             - ReSukiSU
             - KernelSU / KernelSU-Next
             - WildKSU
 
             ### Flash
-            ```
+            ```bash
             fastboot flash init_boot patched_init_boot.img
-            # или через AnyKernel3 / TWRP
+            # or flash via AnyKernel3 / TWRP / KernelFlasher
             ```
-
             > Built by [@palaziks](https://github.com/palazik)
           files: ${{ env.ZIP_PATH }}
           draft: false
