@@ -40,8 +40,8 @@ env:
   KERNEL_MANIFEST_BRANCH: oneplus/sm8750
   KERNEL_MANIFEST_XML: oneplus_13.xml
   BUILD_SCRIPT: kernel_platform/oplus/build/oplus_build_kernel.sh
-  BUILD_TARGET: sun perf gki
-  IMAGE_PATH: .kernel_platform/out/msm-kernel-sun-perf-gki/dist/Image
+  BUILD_TARGET: sun perf
+  IMAGE_PATH: kernel_platform/out/msm-kernel-sun-perf/dist/Image
   ANYKERNEL3_REPO: https://github.com/osm0sis/AnyKernel3
   ANYKERNEL3_BRANCH: master
 
@@ -100,8 +100,7 @@ jobs:
       - name: Sync sources
         working-directory: /home/runner/kernel
         run: |
-          repo sync -c -j$(nproc --all) --force-sync \
-            --no-clone-bundle --no-tags
+          repo sync -c -j2 --force-sync --no-clone-bundle --no-tags --show-progress
           echo "Sync complete"
           df -h
 
