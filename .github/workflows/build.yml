@@ -545,7 +545,7 @@ jobs:
           device.name3=oneplus13
           supported.versions=15-
           '; }
-          block=/dev/block/bootdevice/by-name/init_boot;
+          block=/dev/block/bootdevice/by-name/boot;
           is_slot_device=1;
           ramdisk_compression=auto;
           patch_vbmeta_flag=auto;
@@ -596,7 +596,7 @@ jobs:
 
             ### Flash
             ```
-            fastboot flash init_boot <patched_init_boot.img>
+            fastboot flash init_boot <patched_boot.img>
             ```
 
             > Built by @palaziks
